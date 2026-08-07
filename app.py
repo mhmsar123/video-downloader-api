@@ -132,20 +132,32 @@ def get_info():
         formats = []
         seen = set()
         for f in info.get("formats", []):
-            if f.get("vcodec") == "none" or not f.get("height"):
+            if f.get("vcodec") == "none":
                 continue
-            key = (f.get("height"), f.get("fps"), f.get("ext"))
+            height = f.get("height")
+            ext = f.get("ext") or "mp4"
+            fid = f.get("format_id") or ""
+            fps = f.get("fps")
+            if height:
+                key = (height, fps, ext)
+                label = f"{height}p"
+            elif fid in ("sd", "hd", "ld", "sd_mp4", "hd_mp4", "standard", "high"):
+                key = ("named", fid)
+                label = fid.upper()
+            else:
+                continue
             if key in seen:
                 continue
             seen.add(key)
             formats.append({
-                "height": f.get("height"),
-                "fps": f.get("fps"),
-                "ext": f.get("ext"),
+                "label": label,
+                "height": height,
+                "fps": fps,
+                "ext": ext,
                 "filesize": f.get("filesize") or f.get("filesize_approx"),
-                "format_id": f.get("format_id"),
+                "format_id": fid or label,
             })
-        formats.sort(key=lambda x: (x["height"] or 0, x["fps"] or 0), reverse=True)
+        formats.sort(key=lambda x: (x["height"] or 0), reverse=True)
 
         duration = info.get("duration") or 0
         return jsonify({
@@ -302,6 +314,8 @@ def _download_worker(job, quality, audio_only, audio_quality):
                             f"bestvideo[height<={height}]+bestaudio/"
                             f"bestvideo[height<={height}]/best"
                         )
+                    elif quality in ("sd", "hd", "ld"):
+                        format_str = f"{quality}/bestvideo+bestaudio/best"
                     else:
                         format_str = "bestvideo+bestaudio/best"
                 postprocessors = [{
