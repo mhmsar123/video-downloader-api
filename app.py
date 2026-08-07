@@ -18,6 +18,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "2"))
 CLEANUP_AGE_SEC = int(os.environ.get("CLEANUP_AGE_SEC", str(2 * 3600)))
 API_KEY = os.environ.get("API_KEY", "")
+COOKIES_FILE = os.environ.get("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))
 
 app = Flask(__name__)
 CORS(app)
@@ -36,6 +37,32 @@ BASE_OPTS = {
         "Accept-Language": "en-US,en;q=0.9",
     },
 }
+
+
+def ydl_opts(**extra):
+    opts = {**BASE_OPTS, **extra}
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
+
+
+@app.route("/api/cookies", methods=["POST"])
+def upload_cookies():
+    if not require_api_key():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_data(as_text=True)
+    if not data or "youtube.com" not in data and "# Netscape" not in data:
+        return jsonify({"error": "Invalid cookies file"}), 400
+    with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+        f.write(data)
+    return jsonify({"success": True, "message": "Cookies saved"})
+
+
+@app.route("/api/cookies", methods=["GET"])
+def cookies_status():
+    if not require_api_key():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify({"enabled": os.path.exists(COOKIES_FILE)})
 
 
 def sanitize_filename(name):
@@ -108,7 +135,7 @@ def get_info():
         return jsonify({"error": "Invalid URL"}), 400
 
     try:
-        opts = {**BASE_OPTS, "skip_download": True, "extract_flat": False}
+        opts = ydl_opts(skip_download=True, extract_flat=False)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
@@ -323,14 +350,13 @@ def _download_worker(job, quality, audio_only, audio_quality):
                     "preferedformat": "mp4",
                 }]
 
-            opts = {
-                **BASE_OPTS,
-                "format": format_str,
-                "outtmpl": os.path.join(job_dir, "%(id)s.%(ext)s"),
-                "progress_hooks": [hook],
-                "postprocessors": postprocessors,
-                "merge_output_format": "mp4",
-            }
+            opts = ydl_opts(
+                format=format_str,
+                outtmpl=os.path.join(job_dir, "%(id)s.%(ext)s"),
+                progress_hooks=[hook],
+                postprocessors=postprocessors,
+                merge_output_format="mp4",
+            )
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(job["url"], download=True)
