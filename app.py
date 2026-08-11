@@ -225,6 +225,7 @@ def start_download():
     quality = str(data.get("quality", "best"))
     audio_only = bool(data.get("audio_only", False))
     audio_quality = str(data.get("audio_quality", "192"))
+    subs = data.get("subs", False)
 
     job_id = uuid.uuid4().hex[:12]
     job = {
@@ -242,12 +243,13 @@ def start_download():
         "error": None,
         "cancel": False,
         "audio_only": audio_only,
+        "subtitle": None,
         "created": time.time(),
     }
     with jobs_lock:
         jobs[job_id] = job
 
-    threading.Thread(target=_download_worker, args=(job, quality, audio_only, audio_quality), daemon=True).start()
+    threading.Thread(target=_download_worker, args=(job, quality, audio_only, audio_quality, subs), daemon=True).start()
     return jsonify({"success": True, "job_id": job_id, "status_url": f"/api/status/{job_id}"})
 
 
@@ -257,7 +259,10 @@ def job_status(job_id):
         job = jobs.get(job_id)
         if not job:
             return jsonify({"error": "Job not found"}), 404
-        return jsonify({k: job[k] for k in ("id", "status", "progress", "speed", "eta", "downloaded_bytes", "total_bytes", "title", "thumbnail", "filename", "error", "audio_only")})
+        resp = {k: job[k] for k in ("id", "status", "progress", "speed", "eta", "downloaded_bytes", "total_bytes", "title", "thumbnail", "filename", "error", "audio_only")}
+        sub_path = job.get("subtitle")
+        resp["subtitle"] = os.path.basename(sub_path) if sub_path else None
+        return jsonify(resp)
 
 
 @app.route("/api/cancel/<job_id>", methods=["POST"])
@@ -291,7 +296,26 @@ def download_file(job_id):
     return send_file(path, as_attachment=True, download_name=download_name)
 
 
-def _download_worker(job, quality, audio_only, audio_quality):
+@app.route("/api/subs/<job_id>", methods=["GET"])
+def download_subtitles(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job["status"] != "completed":
+            return jsonify({"error": "Job not ready", "status": job["status"]}), 409
+        path = job.get("subtitle")
+        title = job["title"] or "video"
+
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No subtitles available"}), 404
+
+    ext = os.path.splitext(path)[1] or ".srt"
+    download_name = sanitize_filename(title) + ext
+    return send_file(path, as_attachment=True, download_name=download_name)
+
+
+def _download_worker(job, quality, audio_only, audio_quality, subs=False):
     try:
         with semaphore:
             with jobs_lock:
@@ -350,12 +374,29 @@ def _download_worker(job, quality, audio_only, audio_quality):
                     "preferedformat": "mp4",
                 }]
 
+            subs_langs = None
+            if subs:
+                if isinstance(subs, str) and subs not in ("1", "true", "yes"):
+                    subs_langs = [s.strip() for s in re.split(r"[,;\s]+", subs) if s.strip()] or ["ar", "en"]
+                else:
+                    subs_langs = ["ar", "en"]
+
+            if subs_langs:
+                postprocessors = list(postprocessors) + [{
+                    "key": "FFmpegSubtitleConvertor",
+                    "format": "srt",
+                }]
+
             opts = ydl_opts(
                 format=format_str,
                 outtmpl=os.path.join(job_dir, "%(id)s.%(ext)s"),
                 progress_hooks=[hook],
                 postprocessors=postprocessors,
                 merge_output_format="mp4",
+                writesubtitles=bool(subs_langs),
+                writeautomaticsub=bool(subs_langs),
+                subtitleslangs=subs_langs or None,
+                subtitlesformat="srt" if subs_langs else None,
             )
 
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -369,15 +410,23 @@ def _download_worker(job, quality, audio_only, audio_quality):
             if not files:
                 raise Exception("No file produced")
             final = max(files, key=os.path.getsize)
+            sub_exts = {".srt", ".vtt"}
+            sub_files = [f for f in files if os.path.splitext(f)[1].lower() in sub_exts]
             for extra in files:
-                if extra != final:
+                if extra != final and extra not in sub_files:
                     try:
                         os.remove(extra)
                     except OSError:
                         pass
 
+            subtitle_path = None
+            if sub_files:
+                srt_files = [f for f in sub_files if f.endswith(".srt")]
+                subtitle_path = (srt_files or sorted(sub_files))[0]
+
             with jobs_lock:
                 job["filename"] = final
+                job["subtitle"] = subtitle_path
                 job["filesize"] = os.path.getsize(final)
                 job["status"] = "completed"
                 job["progress"] = 100.0
