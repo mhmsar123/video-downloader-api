@@ -383,7 +383,7 @@ def _download_worker(job, quality, audio_only, audio_quality, subs=False):
 
             if subs_langs:
                 postprocessors = list(postprocessors) + [{
-                    "key": "FFmpegSubtitleConvertor",
+                    "key": "FFmpegSubtitlesConvertor",
                     "format": "srt",
                 }]
 
