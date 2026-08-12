@@ -209,6 +209,83 @@ def _clean_error(e):
     return msg.strip()[:300]
 
 
+@app.route("/api/direct", methods=["POST"])
+def direct_url():
+    """Return a single direct download URL (no server storage) so the phone
+    can download the file straight from the source."""
+    if not require_api_key():
+        return jsonify({"error": "Unauthorized"}), 401
+    ip = client_ip()
+    if rate_limited(ip, limit=20, window=60):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
+
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not is_valid_url(url):
+        return jsonify({"error": "Invalid URL"}), 400
+
+    quality = str(data.get("quality", "best"))
+    audio_only = bool(data.get("audio_only", False))
+
+    try:
+        format_str = _choose_direct_format(quality, audio_only)
+        opts = ydl_opts(skip_download=True, format=format_str, noplaylist=True)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        direct, ext = _resolve_direct_url(info)
+        if not direct:
+            return jsonify({"error": "تعذر استخراج رابط التحميل المباشر"}), 422
+
+        return jsonify({
+            "success": True,
+            "url": direct,
+            "title": info.get("title", "") or "",
+            "thumbnail": info.get("thumbnail", "") or "",
+            "ext": ext,
+            "audio_only": audio_only,
+        })
+    except yt_dlp.utils.DownloadError as e:
+        return jsonify({"error": f"Could not fetch: {_clean_error(e)}"}), 422
+    except Exception as e:
+        return jsonify({"error": f"Fetch failed: {e}"}), 500
+
+
+def _choose_direct_format(quality, audio_only):
+    if audio_only:
+        return "bestaudio/best"
+    if quality == "best" or not re.match(r"\d+", quality):
+        return ("best[acodec!=none][vcodec!=none]"
+                "/best[acodec!=none]"
+                "/best")
+    m = re.match(r"(\d+)", quality)
+    h = m.group(1)
+    return (f"best[height<={h}][acodec!=none][vcodec!=none]"
+            f"/best[height<={h}][acodec!=none]"
+            f"/best[height<={h}]"
+            f"/best[acodec!=none][vcodec!=none]"
+            f"/best[acodec!=none]"
+            f"/best")
+
+
+def _resolve_direct_url(info):
+    """Prefer a single muxed (direct) url; fall back to the first requested
+    format url when a merge would be required (phone cannot merge)."""
+    if info.get("url"):
+        return info["url"], info.get("ext") or "mp4"
+    if "requested_formats" in info:
+        # Try to find a muxed format instead of a merge.
+        for f in info.get("formats", []):
+            if f.get("acodec") not in (None, "none") and f.get("vcodec") not in (None, "none") and f.get("url"):
+                return f["url"], f.get("ext") or "mp4"
+        rf = info["requested_formats"][0]
+        return rf.get("url"), rf.get("ext") or "mp4"
+    for f in info.get("formats", []):
+        if f.get("url"):
+            return f["url"], f.get("ext") or "mp4"
+    return None, "mp4"
+
+
 @app.route("/api/download", methods=["POST"])
 def start_download():
     if not require_api_key():
